@@ -3,17 +3,27 @@ const STATE = {
   seqLen: 2048,
   ratio: 4.0,
   dtype: 'fp16',
-  modelConfigs: null,
+};
+
+const MODEL_CONFIGS = {
+  "gpt2": { layers: 12, heads: 12, head_dim: 64, dtype: "fp16" },
+  "gpt2-medium": { layers: 24, heads: 16, head_dim: 64, dtype: "fp16" },
+  "gpt2-large": { layers: 36, heads: 20, head_dim: 64, dtype: "fp16" },
+  "gpt2-xl": { layers: 48, heads: 25, head_dim: 64, dtype: "fp16" },
+  "llama-7b": { layers: 32, heads: 32, head_dim: 128, dtype: "fp16" },
+  "llama-13b": { layers: 40, heads: 40, head_dim: 128, dtype: "fp16" },
+  "llama-70b": { layers: 80, heads: 64, head_dim: 128, dtype: "fp16" },
 };
 
 function $(s) { return document.querySelector(s); }
 function $$(s) { return document.querySelectorAll(s); }
 
-async function showToast(msg) {
+function showToast(msg) {
   const toast = $('#toast');
+  if (!toast) return;
   toast.textContent = msg;
   toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), 2200);
+  setTimeout(function() { toast.classList.remove('show'); }, 2200);
 }
 
 function formatNumber(n) {
@@ -21,53 +31,9 @@ function formatNumber(n) {
 }
 
 function formatMB(n) {
-  if (n >= 1024) return `${(n / 1024).toFixed(2)} GB`;
-  return `${n.toFixed(1)} MB`;
+  if (n >= 1024) return (n / 1024).toFixed(2) + ' GB';
+  return n.toFixed(1) + ' MB';
 }
-
-async function loadModelConfigs() {
-  try {
-    const res = await fetch('/api/configs');
-    STATE.modelConfigs = (await res.json()).models;
-  } catch (e) {
-    console.warn('Could not load configs, using defaults');
-  }
-}
-
-function applyModelPreset(modelKey) {
-  if (!STATE.modelConfigs || !STATE.modelConfigs[modelKey]) return;
-  const cfg = STATE.modelConfigs[modelKey];
-  $('#seqLenSlider').setAttribute('data-layers', cfg.layers);
-  $('#seqLenSlider').setAttribute('data-heads', cfg.heads);
-  $('#seqLenSlider').setAttribute('data-headdim', cfg.head_dim);
-  const dtypeBtn = $(`.radio-label[data-value="${cfg.dtype}"]`);
-  if (dtypeBtn) dtypeBtn.click();
-}
-
-$('#modelSelect').addEventListener('change', (e) => {
-  STATE.model = e.target.value;
-  applyModelPreset(STATE.model);
-});
-
-$('#seqLenSlider').addEventListener('input', (e) => {
-  STATE.seqLen = parseInt(e.target.value);
-  $('#seqLenValue').textContent = formatNumber(STATE.seqLen);
-});
-
-$('#ratioSlider').addEventListener('input', (e) => {
-  STATE.ratio = parseFloat(e.target.value);
-  $('#ratioValue').textContent = STATE.ratio.toFixed(1) + 'x';
-});
-
-$$('.radio-label').forEach(label => {
-  label.addEventListener('click', function() {
-    $$('.radio-label').forEach(l => l.classList.remove('active'));
-    this.classList.add('active');
-    const input = this.querySelector('input');
-    input.checked = true;
-    STATE.dtype = input.value;
-  });
-});
 
 function getDtypeBytes() {
   switch (STATE.dtype) {
@@ -77,100 +43,157 @@ function getDtypeBytes() {
   }
 }
 
-async function calculate() {
-  const el = $('#seqLenSlider');
-  const layers = parseInt(el.getAttribute('data-layers') || '32');
-  const heads = parseInt(el.getAttribute('data-heads') || '32');
-  const headDim = parseInt(el.getAttribute('data-headdim') || '128');
+function estimateMemory(config) {
+  var cacheSize = config.layers * 2 * config.heads * config.seqLen * config.headDim * config.dtypeBytes;
+  var compressedSize = cacheSize / config.ratio;
+  var saved = cacheSize - compressedSize;
+  return {
+    layers: config.layers,
+    heads: config.heads,
+    headDim: config.headDim,
+    seqLen: config.seqLen,
+    originalMB: cacheSize / (1024 * 1024),
+    compressedMB: compressedSize / (1024 * 1024),
+    savedMB: saved / (1024 * 1024),
+    ratio: config.ratio,
+    reductionPercent: (1 - 1 / config.ratio) * 100,
+  };
+}
 
-  const params = new URLSearchParams({
-    layers: layers,
-    heads: heads,
-    head_dim: headDim,
-    seq_len: STATE.seqLen,
-    ratio: STATE.ratio,
-    dtype: getDtypeBytes(),
+function applyModelPreset(modelKey) {
+  var cfg = MODEL_CONFIGS[modelKey];
+  if (!cfg) return;
+  $('#seqLenSlider').setAttribute('data-layers', cfg.layers);
+  $('#seqLenSlider').setAttribute('data-heads', cfg.heads);
+  $('#seqLenSlider').setAttribute('data-headdim', cfg.head_dim);
+
+  $$('.radio-label').forEach(function(l) {
+    l.classList.remove('active');
   });
 
-  try {
-    const res = await fetch(`/api/estimate?${params.toString()}`);
-    const data = await res.json();
-    renderResults(data);
-  } catch (e) {
-    showToast('Error calculating. Is the server running?');
+  var dtypeBtn = document.querySelector('.radio-label[data-value="' + cfg.dtype + '"]');
+  if (dtypeBtn) {
+    dtypeBtn.classList.add('active');
+    var radio = dtypeBtn.querySelector('input');
+    if (radio) radio.checked = true;
+    STATE.dtype = cfg.dtype;
   }
 }
 
-function renderResults(data) {
-  const container = $('#demoResults');
-  container.innerHTML = `
-    <div class="results-grid">
-      <div class="result-item">
-        <div class="result-item-label">Original Cache</div>
-        <div class="result-item-value">${formatMB(data.original_cache_MB)}</div>
-        <div class="result-item-sub">${data.num_layers} layers x ${data.num_heads} heads x ${data.head_dim}d</div>
-      </div>
-      <div class="result-item">
-        <div class="result-item-label">Compressed Cache</div>
-        <div class="result-item-value" style="color: var(--accent)">${formatMB(data.compressed_cache_MB)}</div>
-        <div class="result-item-sub">${data.sequence_length.toLocaleString()} tokens</div>
-      </div>
-      <div class="result-item">
-        <div class="result-item-label">Memory Saved</div>
-        <div class="result-item-value">${formatMB(data.memory_saved_MB)}</div>
-        <div class="result-item-sub">${data.reduction_percent}% reduction</div>
-      </div>
-      <div class="result-item">
-        <div class="result-item-label">Compression Ratio</div>
-        <div class="result-item-value">${data.compression_ratio}x</div>
-        <div class="result-item-sub">eOptShrinkQ method</div>
-      </div>
-      <div class="result-item wide">
-        <div class="result-item-label">Memory Usage</div>
-        <div class="result-bar-wrap">
-          <div class="result-bar" style="width: ${100 - data.reduction_percent}%"></div>
-        </div>
-        <div class="result-item-sub" style="margin-top: 8px; display: flex; justify-content: space-between;">
-          <span>Compressed: ${formatMB(data.compressed_cache_MB)}</span>
-          <span>Original: ${formatMB(data.original_cache_MB)}</span>
-        </div>
-      </div>
-    </div>
-  `;
+function calculate() {
+  var el = $('#seqLenSlider');
+  var layers = parseInt(el.getAttribute('data-layers') || '32');
+  var heads = parseInt(el.getAttribute('data-heads') || '32');
+  var headDim = parseInt(el.getAttribute('data-headdim') || '128');
+
+  var result = estimateMemory({
+    layers: layers,
+    heads: heads,
+    headDim: headDim,
+    seqLen: STATE.seqLen,
+    ratio: STATE.ratio,
+    dtypeBytes: getDtypeBytes(),
+  });
+
+  renderResults(result);
 }
+
+function renderResults(data) {
+  var container = $('#demoResults');
+  if (!container) return;
+
+  container.innerHTML =
+    '<div class="results-grid">' +
+      '<div class="result-item">' +
+        '<div class="result-item-label">Original Cache</div>' +
+        '<div class="result-item-value">' + formatMB(data.originalMB) + '</div>' +
+        '<div class="result-item-sub">' + data.layers + ' layers x ' + data.heads + ' heads x ' + data.headDim + 'd</div>' +
+      '</div>' +
+      '<div class="result-item">' +
+        '<div class="result-item-label">Compressed Cache</div>' +
+        '<div class="result-item-value" style="color: var(--accent)">' + formatMB(data.compressedMB) + '</div>' +
+        '<div class="result-item-sub">' + formatNumber(data.seqLen) + ' tokens</div>' +
+      '</div>' +
+      '<div class="result-item">' +
+        '<div class="result-item-label">Memory Saved</div>' +
+        '<div class="result-item-value">' + formatMB(data.savedMB) + '</div>' +
+        '<div class="result-item-sub">' + Math.round(data.reductionPercent) + '% reduction</div>' +
+      '</div>' +
+      '<div class="result-item">' +
+        '<div class="result-item-label">Compression Ratio</div>' +
+        '<div class="result-item-value">' + data.ratio.toFixed(1) + 'x</div>' +
+        '<div class="result-item-sub">eOptShrinkQ method</div>' +
+      '</div>' +
+      '<div class="result-item wide">' +
+        '<div class="result-item-label">Memory Usage</div>' +
+        '<div class="result-bar-wrap">' +
+          '<div class="result-bar" style="width: ' + (100 - data.reductionPercent) + '%"></div>' +
+        '</div>' +
+        '<div class="result-item-sub" style="margin-top: 8px; display: flex; justify-content: space-between;">' +
+          '<span>Compressed: ' + formatMB(data.compressedMB) + '</span>' +
+          '<span>Original: ' + formatMB(data.originalMB) + '</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+$('#modelSelect').addEventListener('change', function(e) {
+  STATE.model = e.target.value;
+  applyModelPreset(STATE.model);
+});
+
+$('#seqLenSlider').addEventListener('input', function(e) {
+  STATE.seqLen = parseInt(e.target.value);
+  $('#seqLenValue').textContent = formatNumber(STATE.seqLen);
+});
+
+$('#ratioSlider').addEventListener('input', function(e) {
+  STATE.ratio = parseFloat(e.target.value);
+  $('#ratioValue').textContent = STATE.ratio.toFixed(1) + 'x';
+});
+
+$$('.radio-label').forEach(function(label) {
+  label.addEventListener('click', function() {
+    $$('.radio-label').forEach(function(l) { l.classList.remove('active'); });
+    this.classList.add('active');
+    var input = this.querySelector('input');
+    input.checked = true;
+    STATE.dtype = input.value;
+  });
+});
 
 $('#calculateBtn').addEventListener('click', calculate);
 
 function initHeroCanvas() {
-  const canvas = $('#heroCanvas');
+  var canvas = $('#heroCanvas');
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width;
+  var H = canvas.height;
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
 
-    const time = Date.now() * 0.001;
-    const bars = 14;
-    const barW = 18;
-    const gap = (W - bars * barW) / (bars + 1);
+    var time = Date.now() * 0.001;
+    var bars = 14;
+    var barW = 18;
+    var gap = (W - bars * barW) / (bars + 1);
 
-    for (let i = 0; i < bars; i++) {
-      const x = gap + i * (barW + gap);
-      const baseH = 120;
-      const amp = 60 + Math.sin(time * 0.8 + i * 0.7) * 40 + Math.sin(time * 1.3 + i * 1.1) * 30;
-      const h = baseH + amp;
-      const y = H - h - 60;
+    for (var i = 0; i < bars; i++) {
+      var x = gap + i * (barW + gap);
+      var baseH = 120;
+      var amp = 60 + Math.sin(time * 0.8 + i * 0.7) * 40 + Math.sin(time * 1.3 + i * 1.1) * 30;
+      var h = baseH + amp;
+      var y = H - h - 60;
 
-      const compH = h * 0.25 + Math.sin(time * 0.6 + i * 0.5) * 15;
-      const compY = H - compH - 60;
+      var compH = h * 0.25 + Math.sin(time * 0.6 + i * 0.5) * 15;
+      var compY = H - compH - 60;
 
       ctx.fillStyle = 'rgba(37, 44, 58, 0.6)';
       roundRect(ctx, x, y, barW, h, 4);
       ctx.fill();
 
-      const gradient = ctx.createLinearGradient(x, compY, x, compY + compH);
+      var gradient = ctx.createLinearGradient(x, compY, x, compY + compH);
       gradient.addColorStop(0, '#00e5a0');
       gradient.addColorStop(1, '#00b884');
       ctx.fillStyle = gradient;
@@ -186,13 +209,13 @@ function initHeroCanvas() {
       ctx.fill();
     }
 
-    for (let i = 0; i < 6; i++) {
-      const y = 60 + i * (H - 120) / 5;
+    for (var j = 0; j < 6; j++) {
+      var gy = 60 + j * (H - 120) / 5;
       ctx.strokeStyle = 'rgba(37, 44, 58, 0.3)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(20, y);
-      ctx.lineTo(W - 20, y);
+      ctx.moveTo(20, gy);
+      ctx.lineTo(W - 20, gy);
       ctx.stroke();
     }
 
@@ -212,57 +235,62 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.lineTo(x + r, y + h);
   ctx.arcTo(x, y + h, x, y + h - r, r);
   ctx.lineTo(x, y + r);
-  ctx.arcTo(x, y, x + r, y, r);
+  ctx.arcTo(x, y, x + r, y);
   ctx.closePath();
 }
 
-$('#installBtn').addEventListener('click', (e) => {
+$('#installBtn').addEventListener('click', function(e) {
   e.preventDefault();
-  const cmd = 'pip install kv-cache-compress';
-  navigator.clipboard.writeText(cmd).then(() => {
-    showToast('Copied: ' + cmd);
-  }).catch(() => {
+  var cmd = 'pip install kv-cache-compress';
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(cmd).then(function() {
+      showToast('Copied: ' + cmd);
+    }).catch(function() {
+      showToast(cmd);
+    });
+  } else {
     showToast(cmd);
-  });
+  }
 });
 
 function initScrollReveal() {
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.style.opacity = '1';
-        entry.target.style.transform = 'translateY(0)';
-      }
-    });
-  }, { threshold: 0.1 });
+  try {
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          entry.target.style.opacity = '1';
+          entry.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, { threshold: 0.1 });
 
-  document.querySelectorAll('.feature-card, .metric-card').forEach(el => {
-    el.style.opacity = '0';
-    el.style.transform = 'translateY(20px)';
-    el.style.transition = 'all 500ms cubic-bezier(0.4, 0, 0.2, 1)';
-    observer.observe(el);
-  });
-
-  setTimeout(() => {
-    document.querySelectorAll('.feature-card, .metric-card').forEach(el => {
-      el.style.opacity = '1';
-      el.style.transform = 'translateY(0)';
+    document.querySelectorAll('.feature-card, .metric-card').forEach(function(el) {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(20px)';
+      el.style.transition = 'all 500ms cubic-bezier(0.4, 0, 0.2, 1)';
+      observer.observe(el);
     });
-  }, 200);
+
+    setTimeout(function() {
+      document.querySelectorAll('.feature-card, .metric-card').forEach(function(el) {
+        el.style.opacity = '1';
+        el.style.transform = 'translateY(0)';
+      });
+    }, 200);
+  } catch(e) {}
 }
 
-loadModelConfigs();
 initHeroCanvas();
 initScrollReveal();
 
-document.addEventListener('DOMContentLoaded', () => {
-  $$('.metric-card .metric-value').forEach(el => {
-    const target = el.getAttribute('data-count');
+document.addEventListener('DOMContentLoaded', function() {
+  $$('.metric-card .metric-value').forEach(function(el) {
+    var target = el.getAttribute('data-count');
     if (!target) return;
     el.style.opacity = '0';
     el.style.transform = 'scale(0.5)';
     el.style.transition = 'all 600ms cubic-bezier(0.34, 1.56, 0.64, 1)';
-    setTimeout(() => {
+    setTimeout(function() {
       el.style.opacity = '1';
       el.style.transform = 'scale(1)';
     }, 400);
